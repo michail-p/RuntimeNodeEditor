@@ -16,18 +16,24 @@ This folder contains a light-weight runtime UI for inspecting and editing [xNode
 1. Add a **Canvas** (Screen Space Overlay works best) to your scene if one does not already exist.
 2. Create an empty `RectTransform` child under the canvas and attach the `RuntimeNodeEditor` component.
 3. Assign the `Node Graph` asset you want to edit to the component. Enable **Clone Graph Asset** if you want a temporary copy that won't mutate the source asset while playing.
+4. (Optional) Configure **Port Colors by Type** and add entries to **Custom Port Colors** if you want specific types to share branding at runtime.
 4. Enter Play Mode.
 
 ### Runtime controls
 
 - **Drag nodes** by grabbing their card headers.
-- **Add nodes** via the toolbar ➜ *Add Node* button. This opens a searchable palette built from every `XNode.Node` type in the loaded assemblies.
+- **Add nodes** by right-clicking the empty canvas to open the context menu. Every loaded `XNode.Node` type appears in the list, honouring their `CreateNodeMenu` attributes.
 - **Connect ports** by clicking two compatible ports in sequence. Clicking an already connected pair removes the link.
 - **Remove nodes** with the ✕ button in the node header.
-- **Clear the current port selection** from the toolbar when you want to cancel a pending link.
+- **Cancel a pending connection** with the Escape key.
 - **Edit node fields** directly inside the node card. Basic scalar, string, enum, and boolean fields respect xNode backing-value rules (inputs hide when connected).
 
 All UI elements are generated at runtime, so no prefabs or additional setup are required. The editor also works in builds, enabling basic graph authoring directly in-game.
+
+### Port colors
+
+- Built-in colors exist for `float`, `int`, `string`, `bool`, and a default fallback.
+- Use the **Custom Port Colors** list on `RuntimeNodeEditor` to map any other type (including generics and user-defined classes/structs) to a color. Entries can optionally apply to derived types, and changes propagate instantly to existing port widgets.
 
 ## Extending
 
@@ -35,6 +41,7 @@ The API intentionally exposes a few entry points:
 
 - Call `RuntimeNodeEditor.SetGraph(graph, clone)` at runtime to swap the active graph.
 - Use `RuntimeNodeEditor.CreateNodeInstance(type)` to spawn nodes programmatically.
+- Call `RuntimeNodeEditor.RefreshCustomPortColors()` after modifying the custom-color list via script to reapply colors.
 - Each `RuntimeNodeView` keeps the underlying graph node’s `position` in sync for serialization.
 
 Feel free to tailor the visuals or behaviours by overriding colors, replacing the runtime-generated layout, or layering additional UI systems on top of the provided components.
