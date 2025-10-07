@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -9,158 +8,113 @@ using XNode;
 using TMPro;
 using UnityEngine.InputSystem;
 
-// Runtime UI for inspecting and editing NodeGraph assets.
-// Attach this component to a RectTransform that lives under a Canvas.
-// The editor will build its own minimal UI if none is provided.
 [RequireComponent(typeof(RectTransform))]
 [RequireComponent(typeof(Image))]
 public class RuntimeNodeEditor : UIBehaviour, IPointerDownHandler, IPointerClickHandler
 {
+    public Canvas Canvas;
+
     [Header("Graph")]
-    public NodeGraph graphAsset;
-    public bool cloneGraphAsset = true;
+    public NodeGraph Graph;
+    public Sprite CustomBG;
 
-    [Header("Layout")]
-    public RectTransform viewport;
-    public RectTransform nodeLayer;
-    public RectTransform connectionLayer;
+    [Header("Node")]
+    public Color NodeBGColor = new Color32(24, 24, 24, 200);
+    public Color NodeColor = new Color32(45, 45, 45, 220);
+    public Color SelectedPortColor = new Color32(255, 204, 0, 30);
+    [Space]
+    public Color InputColumnColor = new Color32(100, 100, 100, 40);
+    public Color OutputColumnColor = new Color32(100, 100, 100, 40);
+    public Color SelectedOutlineColor = new Color32(255, 204, 0, 30);
 
-    [Header("Appearance")]
-    public Color backgroundColor = new Color32(24, 24, 24, 200);
-    public Color nodeColor = new Color32(45, 45, 45, 220);
-    public Color selectedPortColor = new Color32(255, 204, 0, 255);
-    public Color connectionColor = new Color32(255, 255, 255, 180);
-    public float connectionThickness = 3f;
-    public float bezierTangentStrength = 80f;
+    [Header("Ports")]
+    public Color PortBGColor = new Color32(80, 80, 80, 200);
+    public Color ConnectorColor = new Color32(255, 255, 255, 255);
+    [Space]
+    public Color DefaultColor = new Color32(200, 200, 200, 255);
+    public Color StringColor = new Color32(255, 150, 100, 255);
+    public Color IntColor = new Color32(100, 255, 150, 255);
+    public Color FloatColor = new Color32(100, 150, 255, 255);
+    public Color BoolColor = new Color32(255, 100, 150, 255);
+    public Color VectorColor = new Color32(110, 210, 255, 255);
+    public Color ColorColor = new Color32(255, 140, 220, 255);
+    public Color SlotColor = new Color32(190, 140, 255, 255);
+    public Color GameObjectColor = new Color32(255, 225, 120, 255);
 
-    [Header("Port Colors by Type")]
-    public Color floatPortColor = new Color32(100, 150, 255, 255);
-    public Color intPortColor = new Color32(100, 255, 150, 255);
-    public Color stringPortColor = new Color32(255, 150, 100, 255);
-    public Color boolPortColor = new Color32(255, 100, 150, 255);
-    public Color defaultPortColor = new Color32(200, 200, 200, 255);
-    [Tooltip("Custom mappings that override default port colors. Use fully qualified type names (e.g. Namespace.TypeName) for best results.")]
-    public List<CustomPortColor> customPortColors = new();
+    [Header("Links")]
+    public Color LinkColor = new Color32(255, 255, 255, 180);
+    public float LinkThickness = 3f;
+    public float BezierTangentStrength = 80f;
+    public int BezierSegments = 20;
 
-    Dictionary<XNode.Node, RuntimeNodeView> nodeViews = new();
-    Dictionary<NodePort, RuntimePortView> portViews = new();
-    List<RuntimeConnectionView> connectionViews = new();
-    List<NodeTypeInfo> nodeTypes = new();
-    readonly List<ResolvedCustomPortColor> resolvedCustomPortColors = new();
-    readonly Dictionary<string, Type> customPortTypeCache = new(StringComparer.Ordinal);
-    readonly HashSet<string> unresolvedCustomPortTypes = new(StringComparer.Ordinal);
+    [Space]
+    public TMP_FontAsset Font;
 
-    [HideInInspector] public RectTransform contextMenu;
-    Vector2 contextMenuScreenPosition;
+    RectTransform _nodeContainer;
+    [HideInInspector] public RectTransform LinkContainer;
 
-    [HideInInspector] public RectTransform cachedRectTransform;
-    [HideInInspector] public Canvas rootCanvas;
-    [HideInInspector] public Image backgroundImage;
+    RectTransform _context;
+    Vector2 _contextPos;
 
-    TMP_FontAsset defaultFont;
+    Dictionary<XNode.Node, RuntimeNode> _nodes = new();
+    Dictionary<NodePort, RuntimePort> _ports = new();
+    List<RuntimeLink> _links = new();
+    Dictionary<(NodePort, NodePort), RuntimeLink> _connections = new();
 
-    [HideInInspector] public NodeGraph runtimeGraph;
-    [HideInInspector] public RuntimePortView pendingPortSelection;
-    [HideInInspector] public RuntimeNodeView selectedNode;
-    [HideInInspector] public bool connectionsDirty;
-    [HideInInspector] public Vector2 nextSpawnPosition = new(80f, 80f);
+    RuntimePort _pendingPortSelection;
+    RuntimeNode _selectedNode;
+    [HideInInspector] public HashSet<RuntimeNode> SelectedNodes = new();
 
-    Vector2 panOffset = Vector2.zero;
-    Vector2 lastMousePosition;
-    bool isPanning;
+    bool _connectionsDirty;
+    Vector2 _nextSpawnPos = new(80f, 80f);
 
-    public struct NodeTypeInfo
-    {
-        public string DisplayName;
-        public Type Type;
-        public int Order;
-    }
-
-    [Serializable]
-    public class CustomPortColor
-    {
-        [Tooltip("Type name to match. Supports assembly qualified names, full names, or simple names.")]
-        public string typeName;
-        [Tooltip("Apply this color to types derived from the specified type.")]
-        public bool includeSubtypes = true;
-        public Color color = Color.white;
-    }
-
-    struct ResolvedCustomPortColor
-    {
-        public Type Type;
-        public bool IncludeSubtypes;
-        public Color Color;
-    }
-
-    public NodeGraph Graph => runtimeGraph;
-    public bool HasGraph => runtimeGraph != null;
-    internal Canvas RootCanvas => rootCanvas;
-    internal Color SelectedPortColor => selectedPortColor;
-    internal float ConnectionThickness => connectionThickness;
-    internal Color ConnectionColor => connectionColor;
-    internal Color NodeColor => nodeColor;
-    internal RectTransform ConnectionLayer => connectionLayer;
-    internal bool UseBezierConnections => true;
-    internal float BezierTangentStrength => bezierTangentStrength;
+    Vector2 _panOffset = Vector2.zero;
+    Vector2 _lastMousePos;
+    bool _isPanning;
 
 
     protected override void Awake()
     {
         base.Awake();
 
-        cachedRectTransform = (RectTransform)transform;
-        rootCanvas = GetComponentInParent<Canvas>();
-        defaultFont = RuntimeFontUtility.GetDefaultFont();
-        EnsureUIHierarchy();
-        RebuildCustomPortColorCache();
-        BuildNodeTypeCache();
-        InitializeGraph();
+        CreateContainers();
+        CreateContext();
     }
 
-#if UNITY_EDITOR
-    protected override void OnValidate()
+    void Update()
     {
-        base.OnValidate();
-        RebuildCustomPortColorCache();
-    }
-#endif
-
-    protected override void OnEnable()
-    {
-        base.OnEnable();
-        RebuildGraphViews();
-    }
-
-    public void SetGraph(NodeGraph graph, bool clone)
-    {
-        graphAsset = graph;
-        cloneGraphAsset = clone;
-        InitializeGraph();
-        RebuildGraphViews();
-    }
-
-    void EnsureUIHierarchy()
-    {
-        backgroundImage = GetComponent<Image>();
-        if (backgroundImage == null)
-            backgroundImage = gameObject.AddComponent<Image>();
-
-        backgroundImage.color = backgroundColor;
-        backgroundImage.raycastTarget = true;
-
-        if (viewport == null) viewport = cachedRectTransform;
-        if (connectionLayer == null)
-            connectionLayer = CreateLayer("Connections", viewport);
-
-        if (nodeLayer == null)
+        if (_connectionsDirty)
         {
-            nodeLayer = CreateLayer("Nodes", viewport);
-            nodeLayer.SetSiblingIndex(connectionLayer.GetSiblingIndex() + 1);
+            CreateConnections();
+            _connectionsDirty = false;
         }
+
+        if (_pendingPortSelection != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            ClearPortSelection();
+
+        if (_selectedNode != null && Keyboard.current.deleteKey.wasPressedThisFrame)
+            DeleteSelectedNodes();
+
+        Pan();
     }
 
-    RectTransform CreateLayer(string name, RectTransform parent)
+    public void SetGraph(NodeGraph graph)
+    {
+        Graph = graph;
+        BuildGraph();
+    }
+
+    void CreateContainers()
+    {
+        LinkContainer = CreateContainer("Links", GetComponent<RectTransform>());
+
+        _nodeContainer = CreateContainer("Nodes", GetComponent<RectTransform>());
+        _nodeContainer.SetSiblingIndex(LinkContainer.GetSiblingIndex() + 1);
+    }
+
+    public Camera GetCanvasCamera() => Canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : Canvas.worldCamera;
+
+    RectTransform CreateContainer(string name, RectTransform parent)
     {
         var go = new GameObject(name, typeof(RectTransform));
         go.transform.SetParent(parent, false);
@@ -175,302 +129,161 @@ public class RuntimeNodeEditor : UIBehaviour, IPointerDownHandler, IPointerClick
         return rect;
     }
 
-    void CreateContextMenu(Vector2 screenPosition)
+    void CreateContext()
     {
-        if (contextMenu != null)
-            Destroy(contextMenu.gameObject);
-
         var menuGO = new GameObject("ContextMenu", typeof(RectTransform));
-        menuGO.transform.SetParent(rootCanvas.transform, false);
-        contextMenu = (RectTransform)menuGO.transform;
+        menuGO.transform.SetParent(Canvas.transform, false);
+        _context = (RectTransform)menuGO.transform;
 
-        contextMenu.pivot = new Vector2(0f, 1f);
-        contextMenu.sizeDelta = new Vector2(180f, 0f);
-
-        // Position directly at mouse
-        RectTransformUtility.ScreenPointToWorldPointInRectangle(
-            (RectTransform)rootCanvas.transform,
-            screenPosition,
-            rootCanvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : rootCanvas.worldCamera,
-            out Vector3 worldPoint
-        );
-        contextMenu.position = worldPoint;
+        _context.pivot = new Vector2(0f, 1f);
+        _context.sizeDelta = new Vector2(180f, 0f);
 
         var bg = menuGO.AddComponent<Image>();
+        bg.sprite = CustomBG != null ? CustomBG : null;
+        bg.type = Image.Type.Sliced;
+        bg.pixelsPerUnitMultiplier = 32;
         bg.color = new Color32(32, 32, 32, 240);
         bg.raycastTarget = true;
 
         var layout = menuGO.AddComponent<VerticalLayoutGroup>();
-        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childAlignment = TextAnchor.UpperCenter;
         layout.spacing = 2f;
         layout.padding = new RectOffset(4, 4, 4, 4);
         layout.childForceExpandHeight = false;
-        layout.childForceExpandWidth = true;
+        layout.childControlHeight = false;
 
-        menuGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        menuGO.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.MinSize;
 
-        // Add menu item for each node type
-        foreach (var nodeType in nodeTypes)
-            CreateContextMenuItem(contextMenu, nodeType.DisplayName, () =>
+        foreach (var node in NodeRegistry.Nodes)
+        {
+            var btn = Instantiate(UIManager.Instance.ButtonPrefab, menuGO.transform);
+            btn.transform.Find("Label").GetComponent<TextMeshProUGUI>().text = node.Name.Replace("Node", "");
+            btn.GetComponent<Button>().onClick.AddListener(() =>
             {
-                CreateNodeInstance(nodeType.Type, contextMenuScreenPosition);
-                HideContextMenu();
+                CreateNodeInstance(node, _contextPos);
+                HideContext();
             });
-    }
-
-    void CreateContextMenuItem(RectTransform parent, string label, UnityEngine.Events.UnityAction action)
-    {
-        var itemGO = new GameObject(label, typeof(RectTransform));
-        itemGO.transform.SetParent(parent, false);
-
-        var image = itemGO.AddComponent<Image>();
-        image.color = new Color32(50, 50, 50, 255);
-        image.raycastTarget = true;
-
-        var button = itemGO.AddComponent<Button>();
-        button.onClick.AddListener(action);
-
-        var colors = button.colors;
-        colors.normalColor = new Color32(50, 50, 50, 255);
-        colors.highlightedColor = new Color32(70, 70, 70, 255);
-        colors.pressedColor = new Color32(40, 40, 40, 255);
-        button.colors = colors;
-
-        var textGO = new GameObject("Text", typeof(RectTransform));
-        textGO.transform.SetParent(itemGO.transform, false);
-
-        var rect = (RectTransform)textGO.transform;
-        rect.anchorMin = Vector2.zero;
-        rect.anchorMax = Vector2.one;
-        rect.offsetMin = new Vector2(8f, 0f);
-        rect.offsetMax = new Vector2(-8f, 0f);
-
-        var txt = textGO.AddComponent<TextMeshProUGUI>();
-        txt.text = label;
-        txt.font = defaultFont;
-        txt.fontSize = 14;
-        txt.color = Color.white;
-        txt.alignment = TextAlignmentOptions.MidlineLeft;
-        txt.textWrappingMode = TextWrappingModes.NoWrap;
-
-        var layout = itemGO.AddComponent<LayoutElement>();
-        layout.minHeight = 28f;
-    }
-
-    void HideContextMenu()
-    {
-        if (contextMenu != null)
-        {
-            Destroy(contextMenu.gameObject);
-            contextMenu = null;
-        }
-    }
-
-    void BuildNodeTypeCache()
-    {
-        nodeTypes.Clear();
-
-        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            if (assembly.IsDynamic)
-                continue;
-
-            Type[] types = Array.Empty<Type>();
-            try
-            {
-                types = assembly.GetTypes();
-            }
-            catch (ReflectionTypeLoadException e)
-            {
-                types = e.Types.Where(t => t != null).ToArray();
-            }
-
-            foreach (var type in types)
-            {
-                if (type == null || type.IsAbstract)
-                    continue;
-
-                if (!typeof(XNode.Node).IsAssignableFrom(type))
-                    continue;
-
-                var menu = type.GetCustomAttribute<XNode.Node.CreateNodeMenuAttribute>();
-                if (menu != null && string.IsNullOrEmpty(menu.menuName))
-                    continue;
-
-                nodeTypes.Add(new NodeTypeInfo
-                {
-                    DisplayName = menu?.menuName ?? SplitTypeName(type.Name),
-                    Order = menu?.order ?? 0,
-                    Type = type
-                });
-            }
         }
 
-        nodeTypes.Sort((a, b) =>
-        {
-            int orderCompare = a.Order.CompareTo(b.Order);
-            if (orderCompare != 0)
-                return orderCompare;
-
-            return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
-        });
+        _context.gameObject.SetActive(false);
     }
 
-    static string SplitTypeName(string name)
+    void HideContext() => _context.gameObject.SetActive(false);
+
+    void BuildGraph()
     {
-        if (string.IsNullOrEmpty(name))
-            return name;
+        foreach (var link in _links)
+            Destroy(link.gameObject);
 
-        var parts = new List<char>(name.Length + 8);
-        for (int i = 0; i < name.Length; i++)
-        {
-            char c = name[i];
-            if (i > 0 && char.IsUpper(c) && char.IsLower(name[i - 1]))
-                parts.Add(' ');
+        _links.Clear();
 
-            parts.Add(c);
-        }
+        foreach (var node in _nodes.Values)
+            Destroy(node.gameObject);
 
-        return new string(parts.ToArray());
-    }
+        _nodes.Clear();
+        _ports.Clear();
 
-    void InitializeGraph()
-    {
-        runtimeGraph = null;
-        if (graphAsset == null)
-            return;
-
-        runtimeGraph = cloneGraphAsset ? graphAsset.Copy() : graphAsset;
-        if (runtimeGraph != null)
-            runtimeGraph.name = cloneGraphAsset ? graphAsset.name + " (Runtime)" : runtimeGraph.name;
-    }
-
-    void RebuildGraphViews()
-    {
-        foreach (var view in connectionViews)
-            if (view != null)
-                Destroy(view.gameObject);
-
-        connectionViews.Clear();
-
-        foreach (var view in nodeViews.Values)
-            if (view != null)
-                Destroy(view.gameObject);
-
-        nodeViews.Clear();
-        portViews.Clear();
-
-        if (!HasGraph)
-            return;
-
-        foreach (XNode.Node node in runtimeGraph.nodes)
-        {
-            if (node == null)
-                continue;
-
-            CreateNodeView(node);
-        }
+        foreach (XNode.Node node in Graph.nodes)
+            CreateNode(node);
 
         SetConnectionsDirty();
     }
 
-    void Update()
+    void Pan()
     {
-        if (connectionsDirty)
+        if (Mouse.current.middleButton.isPressed && !_isPanning)
         {
-            RebuildConnections();
-            connectionsDirty = false;
+            _isPanning = true;
+            _lastMousePos = Mouse.current.position.ReadValue();
         }
+        else if (!Mouse.current.middleButton.isPressed && _isPanning)
+            _isPanning = false;
 
-        if (pendingPortSelection != null && WasCancelPressed())
-            ClearPortSelection();
-
-        if (selectedNode != null && WasDeletePressed())
-            DeleteSelectedNode();
-
-        HandlePanning();
+        if (Mouse.current.middleButton.isPressed)
+        {
+            if (!_isPanning)
+            {
+                _isPanning = true;
+                _lastMousePos = Mouse.current.position.ReadValue();
+            }
+            else
+            {
+                var currentMousePos = Mouse.current.position.ReadValue();
+                _panOffset += (currentMousePos - _lastMousePos) / (Canvas != null ? Canvas.scaleFactor : 1f);
+                _nodeContainer.anchoredPosition = _panOffset;
+                _lastMousePos = currentMousePos;
+            }
+        }
+        else if (_isPanning)
+            _isPanning = false;
     }
 
-    void HandlePanning()
+    void CreateConnections()
     {
-        if (Keyboard.current == null)
-            return;
+        // Build set of current connections from graph
+        var currentConnections = new HashSet<(NodePort, NodePort)>();
 
-        bool middleMouseDown = Mouse.current != null && Mouse.current.middleButton.isPressed;
-
-        if (middleMouseDown && !isPanning)
-        {
-            isPanning = true;
-            lastMousePosition = Mouse.current.position.ReadValue();
-        }
-        else if (!middleMouseDown && isPanning)
-            isPanning = false;
-
-        if (isPanning && Mouse.current != null)
-        {
-            Vector2 currentMousePosition = Mouse.current.position.ReadValue();
-            Vector2 delta = currentMousePosition - lastMousePosition;
-            lastMousePosition = currentMousePosition;
-
-            panOffset += delta / (rootCanvas != null ? rootCanvas.scaleFactor : 1f);
-            if (nodeLayer != null)
-                nodeLayer.anchoredPosition = panOffset;
-        }
-    }
-
-    void RebuildConnections()
-    {
-        foreach (var view in connectionViews)
-            if (view != null) Destroy(view.gameObject);
-
-        connectionViews.Clear();
-
-        foreach (XNode.Node node in runtimeGraph.nodes)
-        {
-            if (node == null)
-                continue;
-
+        foreach (XNode.Node node in Graph.nodes)
             foreach (var port in node.Ports)
             {
                 if (!port.IsOutput)
                     continue;
 
-                if (!portViews.TryGetValue(port, out var fromView))
-                    continue;
-
                 foreach (var targetPort in port.GetConnections())
-                {
-                    if (targetPort == null)
-                        continue;
-
-                    if (!portViews.TryGetValue(targetPort, out var toView))
-                        continue;
-
-                    CreateConnection(fromView, toView);
-                }
+                    currentConnections.Add((port, targetPort));
             }
+
+        // Remove connections that no longer exist
+        var toRemove = new List<(NodePort, NodePort)>();
+        foreach (var kvp in _connections)
+            if (!currentConnections.Contains(kvp.Key))
+            {
+                toRemove.Add(kvp.Key);
+                _links.Remove(kvp.Value);
+                Destroy(kvp.Value.gameObject);
+            }
+
+        foreach (var key in toRemove)
+            _connections.Remove(key);
+
+        // Add new connections
+        foreach (var connection in currentConnections)
+        {
+            if (_connections.ContainsKey(connection))
+                continue;
+
+            if (!_ports.TryGetValue(connection.Item1, out var from))
+                continue;
+
+            if (!_ports.TryGetValue(connection.Item2, out var to))
+                continue;
+
+            _connections[connection] = CreateConnection(from, to);
         }
     }
 
-    void CreateConnection(RuntimePortView from, RuntimePortView to)
+    RuntimeLink CreateConnection(RuntimePort from, RuntimePort to)
     {
         var go = new GameObject("Connection", typeof(RectTransform));
-        go.transform.SetParent(connectionLayer, false);
+        go.transform.SetParent(LinkContainer, false);
 
         var rect = (RectTransform)go.transform;
         rect.anchorMin = new Vector2(0.5f, 0.5f);
         rect.anchorMax = new Vector2(0.5f, 0.5f);
         rect.pivot = new Vector2(0f, 0.5f);
-        rect.sizeDelta = new Vector2(0f, connectionThickness);
+        rect.sizeDelta = new Vector2(0f, LinkThickness);
 
-        go.AddComponent<Image>().color = connectionColor;
+        var image = go.AddComponent<Image>();
+        image.color = LinkColor;
 
-        var connectionView = go.AddComponent<RuntimeConnectionView>();
-        connectionView.Initialize(this, from, to);
-        connectionViews.Add(connectionView);
+        var link = go.AddComponent<RuntimeLink>();
+        link.Initialize(this, from, to);
+        _links.Add(link);
+
+        return link;
     }
 
-    void CreateNodeView(XNode.Node node, Vector2? screenPosition = null)
+    void CreateNode(XNode.Node node, Vector2? screenPosition = null)
     {
         var go = new GameObject(node.name, typeof(RectTransform));
 
@@ -484,78 +297,80 @@ public class RuntimeNodeEditor : UIBehaviour, IPointerDownHandler, IPointerClick
         if (screenPosition.HasValue)
         {
             // Temporarily parent to canvas to set world position correctly
-            go.transform.SetParent(rootCanvas.transform, false);
+            go.transform.SetParent(Canvas.transform, false);
 
-            Camera cam = rootCanvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : rootCanvas.worldCamera;
-            RectTransformUtility.ScreenPointToWorldPointInRectangle((RectTransform)rootCanvas.transform, screenPosition.Value, cam, out Vector3 worldPoint);
+            RectTransformUtility.ScreenPointToWorldPointInRectangle((RectTransform)Canvas.transform, screenPosition.Value, GetCanvasCamera(), out Vector3 worldPoint);
             rect.position = worldPoint;
 
             // Now reparent to nodeLayer (this will maintain world position)
-            go.transform.SetParent(nodeLayer, true);
+            go.transform.SetParent(_nodeContainer, true);
 
             // Store the resulting anchored position back to the node for consistency
             node.position = rect.anchoredPosition;
         }
         else
         {
-            go.transform.SetParent(nodeLayer, false);
-            rect.anchoredPosition = node.position != default ? node.position : nextSpawnPosition;
+            go.transform.SetParent(_nodeContainer, false);
+            rect.anchoredPosition = node.position;
         }
 
         var image = go.AddComponent<Image>();
-        image.color = nodeColor;
+        image.sprite = CustomBG != null ? CustomBG : null;
+        image.type = Image.Type.Sliced;
+        image.pixelsPerUnitMultiplier = 32;
+        image.color = NodeColor;
         image.raycastTarget = true;
 
         go.AddComponent<CanvasGroup>().blocksRaycasts = true;
 
-        var nodeView = go.AddComponent<RuntimeNodeView>();
-        nodeView.Initialize(this, node);
+        var nodeUI = go.AddComponent<RuntimeNode>();
+        nodeUI.Initialize(this, node);
 
-        nodeViews.Add(node, nodeView);
-        foreach (var portView in nodeView.PortViews)
-            portViews[portView.Port] = portView;
+        _nodes.Add(node, nodeUI);
+        foreach (var port in nodeUI._ports)
+            _ports[port.Port] = port;
 
-        nextSpawnPosition += new Vector2(48f, -48f);
+        _nextSpawnPos += new Vector2(48f, -48f);
     }
 
-    internal void RegisterPortView(NodePort port, RuntimePortView view)
+    public void RegisterPort(NodePort port, RuntimePort portUI)
     {
-        portViews[port] = view;
+        _ports[port] = portUI;
         SetConnectionsDirty();
     }
 
-    internal void UnregisterPortView(NodePort port)
+    public void UnregisterPort(NodePort port)
     {
-        if (portViews.ContainsKey(port))
+        if (_ports.ContainsKey(port))
         {
-            portViews.Remove(port);
+            _ports.Remove(port);
             SetConnectionsDirty();
         }
     }
 
-    internal void NotifyNodePositionChanged(XNode.Node node, Vector2 anchoredPosition)
+    public void OnNodePositionChanged(XNode.Node node, Vector2 anchoredPosition)
     {
         node.position = anchoredPosition;
         SetConnectionsDirty();
     }
 
-    internal void HandlePortClicked(RuntimePortView view, PointerEventData eventData)
+    public void OnPortClick(RuntimePort port, PointerEventData eventData)
     {
-        if (pendingPortSelection == view)
+        if (_pendingPortSelection == port)
         {
             ClearPortSelection();
             return;
         }
 
-        if (pendingPortSelection == null)
+        if (_pendingPortSelection == null)
         {
-            pendingPortSelection = view;
-            view.SetSelected(true);
+            _pendingPortSelection = port;
+            port.Select(true);
             return;
         }
 
-        var firstPort = pendingPortSelection.Port;
-        var secondPort = view.Port;
+        var firstPort = _pendingPortSelection.Port;
+        var secondPort = port.Port;
         if (firstPort == null || secondPort == null)
         {
             ClearPortSelection();
@@ -568,9 +383,16 @@ public class RuntimeNodeEditor : UIBehaviour, IPointerDownHandler, IPointerClick
             return;
         }
 
+        if (firstPort.ValueType != secondPort.ValueType)
+        {
+            UIManager.Instance.Message($"Cannot connect {firstPort.node.name}.{firstPort.fieldName} ({GetReadablePortTypeName(firstPort.ValueType)}) -> {secondPort.node.name}.{secondPort.fieldName} ({GetReadablePortTypeName(secondPort.ValueType)}). Port types must match.");
+            ClearPortSelection();
+            return;
+        }
+
         if (!firstPort.CanConnectTo(secondPort))
         {
-            Debug.LogWarning($"RuntimeNodeEditor: Cannot connect {firstPort.node.name}.{firstPort.fieldName} -> {secondPort.node.name}.{secondPort.fieldName}. Check port direction and types.");
+            UIManager.Instance.Message($"Cannot connect {firstPort.node.name}.{firstPort.fieldName} -> {secondPort.node.name}.{secondPort.fieldName}. Check port direction and types.");
             ClearPortSelection();
             return;
         }
@@ -588,327 +410,156 @@ public class RuntimeNodeEditor : UIBehaviour, IPointerDownHandler, IPointerClick
         SetConnectionsDirty();
     }
 
-    internal void SetConnectionsDirty()
+    public void SetConnectionsDirty()
     {
-        foreach (var nodeView in nodeViews.Values)
-            if (nodeView != null)
-                nodeView.RefreshFieldViews();
+        foreach (var node in _nodes.Values)
+            node.CreateFieldUIs();
 
-        connectionsDirty = true;
+        _connectionsDirty = true;
     }
 
-    internal void SetSelectedNode(RuntimeNodeView nodeView) => selectedNode = nodeView;
+    public void SelectNode(RuntimeNode node, bool multiSelect = false)
+    {
+        if (multiSelect)
+        {
+            if (SelectedNodes.Contains(node))
+                SelectedNodes.Remove(node);
+            else
+                SelectedNodes.Add(node);
+        }
+        else
+        {
+            SelectedNodes.Clear();
+            SelectedNodes.Add(node);
+        }
+
+        _selectedNode = node;
+    }
+
+    public void ClearNodeSelection()
+    {
+        SelectedNodes.Clear();
+        _selectedNode = null;
+    }
+
+    public void DeleteSelectedNodes()
+    {
+        if (SelectedNodes.Count == 0)
+            return;
+
+        var nodesToDelete = new List<RuntimeNode>(SelectedNodes);
+        SelectedNodes.Clear();
+        _selectedNode = null;
+
+        foreach (var node in nodesToDelete)
+            DeleteNode(node);
+    }
 
     public void ClearPortSelection()
     {
-        if (pendingPortSelection != null)
-        {
-            pendingPortSelection.SetSelected(false);
-            pendingPortSelection = null;
-        }
+        _pendingPortSelection?.Select(false);
+        _pendingPortSelection = null;
     }
 
-    public void RemoveNode(RuntimeNodeView view)
+    public void DeleteNode(RuntimeNode node)
     {
-        if (!HasGraph)
-            return;
+        if (_nodes.ContainsKey(node.Node))
+            _nodes.Remove(node.Node);
 
-        if (view == null || view.Node == null)
-            return;
+        foreach (var port in node._ports)
+            _ports.Remove(port.Port);
 
-        if (nodeViews.ContainsKey(view.Node))
-            nodeViews.Remove(view.Node);
-
-        foreach (var portView in view.PortViews)
-        {
-            if (portView == null)
-                continue;
-
-            portViews.Remove(portView.Port);
-        }
-
-        runtimeGraph.RemoveNode(view.Node);
-        Destroy(view.gameObject);
+        Graph.RemoveNode(node.Node);
+        Destroy(node.gameObject);
         SetConnectionsDirty();
     }
 
     public XNode.Node CreateNodeInstance(Type type, Vector2? screenPosition = null)
     {
-        if (type == null || !typeof(XNode.Node).IsAssignableFrom(type))
-            return null;
+        var disallowMultipleAttribute = type.GetCustomAttribute<XNode.Node.DisallowMultipleNodesAttribute>();
+        if (disallowMultipleAttribute != null)
+        {
+            int count = 0;
+            foreach (var n in Graph.nodes)
+                if (n != null && n.GetType() == type)
+                    count++;
 
-        if (!HasGraph)
-            return null;
-
-        var attribute = type.GetCustomAttribute<XNode.Node.DisallowMultipleNodesAttribute>();
-        if (attribute != null)
-            if (runtimeGraph.nodes.Count(n => n != null && n.GetType() == type) >= attribute.max)
+            if (count >= disallowMultipleAttribute.max)
             {
-                Debug.LogWarning($"Disallowed multiple nodes of type {type.Name}");
+                UIManager.Instance.Message($"Disallowed multiple nodes of type {type.Name}");
                 return null;
             }
+        }
 
-        var node = runtimeGraph.AddNode(type);
-        if (node == null)
-            return null;
-
-        node.name = GenerateUniqueNodeName(type.Name);
-        node.position = nextSpawnPosition; // Store default, will be overridden by world position
+        var node = Graph.AddNode(type);
+        node.position = _nextSpawnPos; // Store default, will be overridden by world position
+        node.name = type.ToString().Replace("Node", "");
         node.UpdatePorts();
 
-        CreateNodeView(node, screenPosition);
+        CreateNode(node, screenPosition);
         SetConnectionsDirty();
 
         return node;
     }
 
-    string GenerateUniqueNodeName(string baseName)
-    {
-        string candidate = baseName;
-        int suffix = 1;
-        while (runtimeGraph.nodes.Any(n => n != null && n.name == candidate))
-        {
-            candidate = $"{baseName} {suffix}";
-            suffix++;
-        }
-
-        return candidate;
-    }
-
     public void OnPointerDown(PointerEventData eventData)
     {
-        if (eventData == null)
-            return;
-
         if (eventData.pointerCurrentRaycast.gameObject == gameObject)
         {
-            selectedNode = null;
+            ClearNodeSelection();
             ClearPortSelection();
-            HideContextMenu();
+            HideContext();
         }
     }
 
     public void OnPointerClick(PointerEventData eventData)
     {
-        if (eventData == null || eventData.button != PointerEventData.InputButton.Right)
-            return;
-
-        if (eventData.pointerCurrentRaycast.gameObject == gameObject)
+        if (eventData.pointerCurrentRaycast.gameObject == gameObject && eventData.button == PointerEventData.InputButton.Right)
         {
-            HideContextMenu();
+            HideContext();
 
-            // Store screen position for node spawning
-            contextMenuScreenPosition = eventData.position;
+            _contextPos = eventData.position;
 
-            CreateContextMenu(eventData.position);
+            // Position directly at mouse
+            RectTransformUtility.ScreenPointToWorldPointInRectangle(
+                (RectTransform)Canvas.transform,
+                eventData.position,
+                Canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : Canvas.worldCamera,
+                out Vector3 worldPoint
+            );
+            _context.position = worldPoint;
+            _context.gameObject.SetActive(true);
+            _context.SetAsLastSibling();
         }
     }
 
-    bool WasCancelPressed() => Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame;
-
-    bool WasDeletePressed() => Keyboard.current != null && Keyboard.current.deleteKey.wasPressedThisFrame;
-
-    void DeleteSelectedNode()
-    {
-        if (selectedNode == null || selectedNode.Node == null)
-            return;
-
-        var node = selectedNode.Node;
-
-        // Clear selection
-        selectedNode = null;
-
-        // Remove from graph
-        if (runtimeGraph != null)
-            runtimeGraph.RemoveNode(node);
-
-        // Remove view
-        if (nodeViews.ContainsKey(node))
-        {
-            var view = nodeViews[node];
-            nodeViews.Remove(node);
-
-            // Unregister all port views
-            foreach (var portView in view.PortViews)
-                if (portViews.ContainsKey(portView.Port))
-                    portViews.Remove(portView.Port);
-
-            Destroy(view.gameObject);
-        }
-
-        SetConnectionsDirty();
-    }
-
-    public Color GetPortColor(Type portType)
-    {
-        if (TryGetCustomPortColor(portType, out var customColor))
-            return customColor;
-
-        if (portType == null)
-            return defaultPortColor;
-
-        if (portType == typeof(float) || portType == typeof(double))
-            return floatPortColor;
-        if (portType == typeof(int) || portType == typeof(long) || portType == typeof(short) || portType == typeof(byte))
-            return intPortColor;
-        if (portType == typeof(string))
-            return stringPortColor;
-        if (portType == typeof(bool))
-            return boolPortColor;
-
-        return defaultPortColor;
-    }
-
-    void RebuildCustomPortColorCache()
-    {
-        resolvedCustomPortColors.Clear();
-        customPortTypeCache.Clear();
-        unresolvedCustomPortTypes.Clear();
-
-        if (customPortColors == null)
-            return;
-
-        foreach (var entry in customPortColors)
-        {
-            if (entry == null)
-                continue;
-
-            var type = ResolveCustomPortType(entry.typeName);
-            if (type == null)
-            {
-                if (!string.IsNullOrWhiteSpace(entry.typeName) && unresolvedCustomPortTypes.Add(entry.typeName))
-                    Debug.LogWarning($"RuntimeNodeEditor: Unable to resolve type '{entry.typeName}' for custom port color.", this);
-                continue;
-            }
-
-            resolvedCustomPortColors.Add(new ResolvedCustomPortColor
-            {
-                Type = type,
-                IncludeSubtypes = entry.includeSubtypes,
-                Color = entry.color
-            });
-        }
-
-        RefreshAllPortViewColors();
-    }
-
-    Type ResolveCustomPortType(string typeName)
-    {
-        if (string.IsNullOrWhiteSpace(typeName))
-            return null;
-
-        typeName = typeName.Trim();
-        if (customPortTypeCache.TryGetValue(typeName, out var cached))
-            return cached;
-
-        Type resolved = Type.GetType(typeName, throwOnError: false, ignoreCase: false);
-
-        if (resolved == null)
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (assembly.IsDynamic)
-                    continue;
-
-                try
-                {
-                    resolved = assembly.GetType(typeName, false, false);
-                    if (resolved != null)
-                        break;
-                }
-                catch (ReflectionTypeLoadException e)
-                {
-                    foreach (var candidate in e.Types)
-                    {
-                        if (candidate == null)
-                            continue;
-
-                        if (string.Equals(candidate.FullName, typeName, StringComparison.Ordinal) ||
-                            string.Equals(candidate.Name, typeName, StringComparison.Ordinal))
-                        {
-                            resolved = candidate;
-                            break;
-                        }
-                    }
-                }
-
-                if (resolved != null)
-                    break;
-
-                Type[] types = Array.Empty<Type>();
-                try
-                {
-                    types = assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException e)
-                {
-                    types = e.Types.Where(t => t != null).ToArray();
-                }
-
-                resolved = types.FirstOrDefault(t => string.Equals(t.FullName, typeName, StringComparison.Ordinal));
-                if (resolved != null)
-                    break;
-
-                resolved = types.FirstOrDefault(t => string.Equals(t.Name, typeName, StringComparison.Ordinal));
-                if (resolved != null)
-                    break;
-            }
-        }
-
-        customPortTypeCache[typeName] = resolved;
-        return resolved;
-    }
-
-    bool TryGetCustomPortColor(Type portType, out Color color)
+    string GetReadablePortTypeName(Type portType)
     {
         if (portType == null)
-        {
-            color = default;
-            return false;
-        }
+            return "None";
 
-        foreach (var entry in resolvedCustomPortColors)
-        {
-            if (entry.Type == null)
-                continue;
-
-            if (portType == entry.Type || (entry.IncludeSubtypes && entry.Type.IsAssignableFrom(portType)))
-            {
-                color = entry.Color;
-                return true;
-            }
-        }
-
-        if (portType.IsGenericType)
-        {
-            var definition = portType.GetGenericTypeDefinition();
-            foreach (var entry in resolvedCustomPortColors)
-            {
-                if (entry.Type == null)
-                    continue;
-
-                if (definition == entry.Type || (entry.IncludeSubtypes && entry.Type.IsAssignableFrom(definition)))
-                {
-                    color = entry.Color;
-                    return true;
-                }
-            }
-        }
-
-        color = default;
-        return false;
+        return portType.Name;
     }
 
-    void RefreshAllPortViewColors()
+    public Color GetPortColor(Type portType) => portType switch
     {
-        foreach (var view in portViews.Values)
-        {
-            if (view == null)
-                continue;
+        null => DefaultColor,
+        Type t when t == typeof(string) => StringColor,
+        Type t when t == typeof(int) => IntColor,
+        Type t when t == typeof(float) => FloatColor,
+        Type t when t == typeof(bool) => BoolColor,
+        Type t when t == typeof(Vector2) || t == typeof(Vector3) => VectorColor,
+        Type t when t == typeof(Color) => ColorColor,
+        Type t when t == typeof(Slot) => SlotColor,
+        Type t when t == typeof(GameObject) => GameObjectColor,
+        _ => DefaultColor
+    };
+}
 
-            view.RefreshColor();
-        }
-    }
-
-    public void RefreshCustomPortColors() => RebuildCustomPortColorCache();
+[Serializable]
+public class CustomPortType
+{
+    public string Name;
+    [HideInInspector] public Type ResolvedType;
+    public Color Color = Color.white;
 }

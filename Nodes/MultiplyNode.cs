@@ -1,4 +1,3 @@
-[CreateNodeMenu("Runtime Samples/Multiply")]
 public class MultiplyNode : XNode.Node
 {
     [Input] public float A;
@@ -10,9 +9,6 @@ public class MultiplyNode : XNode.Node
         if (port.fieldName != nameof(Result))
             return null;
 
-        float a = GetInputValue(nameof(A), A);
-        float b = GetInputValue(nameof(B), B);
-
-        return a * b;
+        return GetInputValue(nameof(A), A) * GetInputValue(nameof(B), B);
     }
 }
